@@ -91,7 +91,10 @@ export async function management(store: Store, user: Actor, method: string, path
       if (appId && !/^\d+$/.test(appId)) fail(400, 'invalid_app_id');
       if (type === 'github_app' && body.token !== undefined || type === 'bot_account' && (body.private_key !== undefined || body.app_id !== undefined)) fail(400, 'conflicting_credentials');
       const key = type === 'github_app' ? 'private_key' : 'token';
-      const value = credential(type, body[key]), webhookSecret = text(body.webhook_secret, 32768), id = randomId(), endpoint = randomId();
+      const value = credential(type, body[key]);
+      // The dialog submits every field; an untouched optional secret arrives as an empty string.
+      const webhookSecret = typeof body.webhook_secret === 'string' && body.webhook_secret.trim() ? text(body.webhook_secret, 32768) : '';
+      const id = randomId(), endpoint = randomId();
       return store.transaction(() => {
         store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)', id, name, type, appId, store.secrets.seal({ [key]: value }, `account:${id}`), new Date().toISOString());
         store.run('INSERT INTO endpoints VALUES(?,?,?)', endpoint, id, store.secrets.seal({ value: webhookSecret }, `endpoint:${endpoint}`));

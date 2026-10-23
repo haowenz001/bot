@@ -148,9 +148,25 @@ function list(store: Store): Json {
   const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.model_id,
     e.state AS environment_state,${projectActivityColumns} FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id ${projectActivityJoin}`).map(r => [r.id, r]));
   const scope = new Map<string, Row>();
-  for (const row of store.all('SELECT i.*,a.name AS account_name FROM installed_repositories i JOIN accounts a ON a.id=i.account_id ORDER BY i.installed DESC')) {
+  // A repository can be visible to an App installation and to a bot account's token. Prefer the bot
+  // account, because one-click onboarding and the gate/dashboard checks need a token that reaches
+  // beyond the installation. A registered repository keeps whichever account it was started with.
+  for (const row of store.all(`SELECT i.*,a.name AS account_name,a.type AS account_type FROM installed_repositories i
+    JOIN accounts a ON a.id=i.account_id ORDER BY i.installed DESC, CASE a.type WHEN 'bot_account' THEN 0 ELSE 1 END`)) {
     const current = scope.get(row.repository_id), owner = registered.get(row.repository_id)?.account_id;
-    if (!current || !current.installed && row.installed || row.account_id === owner && row.installed >= current.installed) scope.set(row.repository_id, row);
+    if (!current) { scope.set(row.repository_id, row); continue; }
+    if (owner) { if (row.account_id === owner && row.installed) scope.set(row.repository_id, row); continue; }
+    if (!current.installed && row.installed) { scope.set(row.repository_id, row); continue; }
+    if (current.installed === row.installed && current.account_type !== 'bot_account' && row.account_type === 'bot_account') scope.set(row.repository_id, row);
+  }
+  // Every installed account that can see this repository, bot accounts first, so the start dialog
+  // can show a choice when an App installation and a bot token both cover it.
+  const accountChoices = new Map<string, Json[]>();
+  for (const row of store.all(`SELECT i.repository_id,i.account_id,i.installation_id,i.installed,a.name,a.type FROM installed_repositories i
+    JOIN accounts a ON a.id=i.account_id WHERE i.installed=1 ORDER BY CASE a.type WHEN 'bot_account' THEN 0 ELSE 1 END`)) {
+    const bucket = accountChoices.get(row.repository_id) || [];
+    if (!bucket.some(item => item.id === row.account_id)) bucket.push({ id: row.account_id, name: row.name, type: row.type, installation_id: row.installation_id || null });
+    accountChoices.set(row.repository_id, bucket);
   }
   const ids = [...new Set([...scope.keys(), ...registered.keys()])];
   const repositories = ids.map(id => {
@@ -159,7 +175,7 @@ function list(store: Store): Json {
       account_id: reg?.account_id || seen!.account_id, account_name: seen?.account_name || null, installation_id: seen?.installation_id || null,
       installed: seen ? !!seen.installed : null, synced_at: seen?.synced_at || null, registered: !!reg, enabled: !!reg?.enabled,
       review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
-      running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0 };
+      running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, accounts: accountChoices.get(id) || [] };
   }).sort((a, b) => Number(b.registered) - Number(a.registered) || a.full_name.localeCompare(b.full_name));
   return { repositories, syncs: store.all('SELECT s.*,a.name AS account_name FROM installation_syncs s JOIN accounts a ON a.id=s.account_id') };
 }
@@ -167,7 +183,8 @@ function activate(store: Store, user: Actor, id: string, input: Json): Json {
   fields(input, ['account_id', 'model_id', 'development_enabled']);
   if (input.development_enabled !== undefined && typeof input.development_enabled !== 'boolean') fail(400, 'invalid_policy');
   const registered = store.get('SELECT * FROM repositories WHERE id=?', id);
-  const candidates = store.all('SELECT * FROM installed_repositories WHERE repository_id=? AND installed=1', id);
+  const candidates = store.all(`SELECT i.*,a.type AS account_type FROM installed_repositories i JOIN accounts a ON a.id=i.account_id
+    WHERE i.repository_id=? AND i.installed=1 ORDER BY CASE a.type WHEN 'bot_account' THEN 0 ELSE 1 END`, id);
   const chosen = input.account_id ? candidates.find(c => c.account_id === text(input.account_id)) : candidates[0];
   if (!registered && !chosen) return fail(404, 'repository_not_installed');
   const model = input.model_id === undefined || input.model_id === null || input.model_id === '' ? null : text(input.model_id);
