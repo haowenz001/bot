@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { SecretBox, randomId } from '../core/security.js';
 import { externalStorage } from '../external/storage.js';
 import { boardStorage } from '../board/storage.js';
+import { metricsStorage } from '../metrics/storage.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -88,6 +89,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS installation_syncs(account_id TEXT PRIMARY KEY REFERENCES accounts(id),synced_at TEXT,error TEXT,repositories INTEGER);`);
     externalStorage(this);
     boardStorage(this);
+    metricsStorage(this);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }
